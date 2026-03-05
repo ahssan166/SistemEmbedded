@@ -1,171 +1,104 @@
 /**
  * @file    main.c
- * @brief   P04 - Push Button Pull-Down Resistor External
+ * @brief   P04 — Ground Guardian: Tombol Pull-DOWN Eksternal (220Ω ke GND)
  *
  * ================================================================
  * KONSEP: GPIO INPUT dengan Pull-Down Resistor EKSTERNAL
  * ================================================================
  *
- * Pull-Down Resistor:
- *   Kebalikan dari pull-up. Resistor terhubung dari GPIO ke GND.
- *
- *   • Tombol TIDAK ditekan: pin = LOW  (0V melalui resistor ke GND)
- *   • Tombol DITEKAN      : pin = HIGH (3.3V masuk melalui tombol)
- *   → Active-HIGH behavior: press = HIGH
+ * ESP32 GPIO35 adalah INPUT ONLY (tidak ada internal pull-down).
+ * Ini ideal untuk demo pull-down EKSTERNAL — kita harus menyediakan
+ * resistor 220Ω dari GPIO35 ke GND secara fisik.
  *
  * RANGKAIAN Pull-Down External:
- *
- *   3.3V ─[BTN]─┬─ PB1 (GPIO INPUT, NOPULL)
+ *   3.3V ─[BTN]─┬─ GPIO35 (INPUT, no internal pull)
  *                │
  *             [220Ω]
  *                │
  *               GND
  *
- *   Tombol OPEN  : PB1 = LOW  (0V via 220Ω ke GND) → LED OFF
- *   Tombol PRESS : PB1 = HIGH (3.3V masuk, arus via 220Ω ke GND)
- *   → Active-HIGH: press = HIGH
+ *   Tombol TIDAK ditekan : GPIO35 = LOW  (0V via 220Ω ke GND)
+ *   Tombol DITEKAN       : GPIO35 = HIGH (3.3V masuk, arus via 220Ω)
+ *   → Active-HIGH behavior: press = HIGH
  *
- * Perbandingan P03 vs P04:
- *   P03 Pull-Up   Ext: pin default=HIGH, press=LOW  (Active-LOW)
- *   P04 Pull-Down Ext: pin default=LOW,  press=HIGH (Active-HIGH)
+ * LED: GPIO4 ─[220Ω]─ LED+ LED- ─ GND
  *
- * HARDWARE: STM32F103C8T6 Blue Pill
- * CLOCK   : HSI → PLL × 16 = 64 MHz
+ * PLATFORM : ESP32 DevKit V1
+ * FRAMEWORK: ESP-IDF (FreeRTOS)
  * ================================================================
  */
 
-#include "stm32f1xx_hal.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "driver/gpio.h"
 
 /* ================================================================
  *  PIN DEFINITIONS
  * ================================================================ */
-/* Button: INPUT dengan pull-down EXTERNAL */
-#define BTN_PORT   GPIOB
-#define BTN_PIN    GPIO_PIN_1    /* PB1 ke pin tengah tombol */
-/* Rangkaian: VCC ─[BTN]─ PB1 ─[220Ω]─ GND */
+/* GPIO35: INPUT ONLY, tidak ada internal pull-down!
+ * → Wajib pakai pull-down eksternal 220Ω ke GND */
+#define BTN_PIN   GPIO_NUM_35
 
-/* LED Output: menyala saat tombol ditekan */
-#define LED_PORT   GPIOA
-#define LED_PIN    GPIO_PIN_1    /* PA1 ─[220Ω]─ LED */
+/* LED Output */
+#define LED_PIN   GPIO_NUM_4
 
 /* ================================================================
  *  VARIABLES
  * ================================================================ */
-static uint8_t led_state = 0;
-static uint8_t last_btn  = 0;   /* 0=LOW=OPEN (default dengan pull-down) */
-
-/* ================================================================
- *  FUNCTION PROTOTYPES
- * ================================================================ */
-void SystemClock_Config(void);
-static void GPIO_Init(void);
-
-/* ================================================================
- *  MAIN
- * ================================================================ */
-int main(void)
-{
-    HAL_Init();
-    SystemClock_Config();
-    GPIO_Init();
-
-    HAL_GPIO_WritePin(LED_PORT, LED_PIN, GPIO_PIN_RESET);
-
-    while (1)
-    {
-        /* =====================================================
-         *  BACA STATUS TOMBOL
-         *  GPIO_PIN_SET   (1) = HIGH = tombol DITEKAN   (active-high)
-         *  GPIO_PIN_RESET (0) = LOW  = tombol TIDAK DITEKAN
-         * ===================================================== */
-        GPIO_PinState btn = HAL_GPIO_ReadPin(BTN_PORT, BTN_PIN);
-
-        /* =====================================================
-         *  TOGGLE LED saat tombol baru ditekan
-         *  Deteksi RISING EDGE: LOW → HIGH
-         *  (last_btn=0 artinya sebelumnya LOW=tidak ditekan,
-         *   btn=1  artinya sekarang HIGH=ditekan → tekan baru)
-         * ===================================================== */
-        if ((btn == GPIO_PIN_SET) && (last_btn == 0))
-        {
-            /* Tombol baru ditekan → toggle LED */
-            led_state = !led_state;
-            HAL_GPIO_WritePin(LED_PORT, LED_PIN,
-                              led_state ? GPIO_PIN_SET : GPIO_PIN_RESET);
-
-            HAL_Delay(50);  /* Simple debounce delay */
-        }
-
-        /* Simpan status tombol sebelumnya */
-        last_btn = (btn == GPIO_PIN_SET) ? 1 : 0;
-
-        HAL_Delay(10);
-    }
-}
+static int led_state = 0;
+static int last_btn  = 0;  /* Default LOW (pull-down menjaga LOW saat lepas) */
 
 /* ================================================================
  *  GPIO INITIALIZATION
  * ================================================================ */
-static void GPIO_Init(void)
+static void gpio_init_all(void)
 {
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    /* GPIO4: OUTPUT (LED) */
+    gpio_config_t out_conf = {
+        .pin_bit_mask = (1ULL << LED_PIN),
+        .mode         = GPIO_MODE_OUTPUT,
+        .pull_up_en   = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&out_conf);
+    gpio_set_level(LED_PIN, 0);
 
-    __HAL_RCC_GPIOA_CLK_ENABLE();
-    __HAL_RCC_GPIOB_CLK_ENABLE();
-
-    /* ---- PA1: OUTPUT PUSH-PULL (LED Indicator) ---- */
-    HAL_GPIO_WritePin(LED_PORT, LED_PIN, GPIO_PIN_RESET);
-    GPIO_InitStruct.Pin   = LED_PIN;
-    GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
-    GPIO_InitStruct.Pull  = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_Init(LED_PORT, &GPIO_InitStruct);
-
-    /* ---- PB1: INPUT FLOATING (pull-down dari EXTERNAL 220Ω) ----
-     *
-     *  GPIO_MODE_INPUT + GPIO_NOPULL:
-     *    Resistor 220Ω antara PB1 dan GND menjaga pin tetap LOW
-     *    saat tombol tidak ditekan (memastikan kondisi terdefinisi).
-     *
-     *  Saat tombol ditekan: 3.3V → PB1 (HIGH), arus 15mA via 220Ω ke GND.
-     *  Resistor berfungsi sebagai current limiter sekaligus pull-down.
-     *
-     *  CATATAN: Untuk aplikasi nyata, gunakan 10kΩ untuk efisiensi daya.
-     *    220Ω dipakai di sini karena itu yang tersedia di kit praktikum.
-     */
-    GPIO_InitStruct.Pin   = BTN_PIN;
-    GPIO_InitStruct.Mode  = GPIO_MODE_INPUT;
-    GPIO_InitStruct.Pull  = GPIO_NOPULL;    /* ← External pull-down 220Ω */
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_Init(BTN_PORT, &GPIO_InitStruct);
+    /* GPIO35: INPUT ONLY — tanpa pull internal
+     * Perlu pull-down eksternal 220Ω ke GND di rangkaian */
+    gpio_config_t in_conf = {
+        .pin_bit_mask = (1ULL << BTN_PIN),
+        .mode         = GPIO_MODE_INPUT,
+        .pull_up_en   = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&in_conf);
 }
 
 /* ================================================================
- *  SYSTEM CLOCK: HSI → PLL × 16 = 64 MHz
+ *  MAIN APPLICATION
  * ================================================================ */
-void SystemClock_Config(void)
+void app_main(void)
 {
-    RCC_OscInitTypeDef RCC_OscInitStruct = {0};
-    RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+    gpio_init_all();
 
-    RCC_OscInitStruct.OscillatorType      = RCC_OSCILLATORTYPE_HSI;
-    RCC_OscInitStruct.HSIState            = RCC_HSI_ON;
-    RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-    RCC_OscInitStruct.PLL.PLLState        = RCC_PLL_ON;
-    RCC_OscInitStruct.PLL.PLLSource       = RCC_PLLSOURCE_HSI_DIV2;
-    RCC_OscInitStruct.PLL.PLLMUL          = RCC_PLL_MUL16;
-    if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) { while (1); }
+    while (1)
+    {
+        /* Baca GPIO35: Active-High pull-down
+         * 1 = BTN DITEKAN (HIGH, 3.3V masuk)
+         * 0 = BTN TIDAK DITEKAN (LOW via eksternal 220Ω ke GND) */
+        int btn = gpio_get_level(BTN_PIN);
 
-    RCC_ClkInitStruct.ClockType      = RCC_CLOCKTYPE_HCLK  | RCC_CLOCKTYPE_SYSCLK
-                                     | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
-    RCC_ClkInitStruct.SYSCLKSource   = RCC_SYSCLKSOURCE_PLLCLK;
-    RCC_ClkInitStruct.AHBCLKDivider  = RCC_SYSCLK_DIV1;
-    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
-    RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
-    if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK) { while (1); }
-}
+        /* Toggle LED pada rising edge (LOW → HIGH = tekan baru) */
+        if ((btn == 1) && (last_btn == 0))
+        {
+            led_state = !led_state;
+            gpio_set_level(LED_PIN, led_state);
+            vTaskDelay(pdMS_TO_TICKS(50));   /* debounce */
+        }
 
-void SysTick_Handler(void)
-{
-    HAL_IncTick();
+        last_btn = btn;
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
 }
