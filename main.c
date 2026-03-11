@@ -1,104 +1,102 @@
 /**
- * @file    main.c
- * @brief   P04 — Ground Guardian: Tombol Pull-DOWN Eksternal (220Ω ke GND)
+ * ============================================================
+ *  ESP32_01_EXTI_Interrupt
+ * ============================================================
+ *  Modul   : 02 - Interrupt & Timer
+ *  Board   : ESP32 / ESP32-S2 / ESP32-S3
+ *  Framework: ESP-IDF
  *
- * ================================================================
- * KONSEP: GPIO INPUT dengan Pull-Down Resistor EKSTERNAL
- * ================================================================
+ *  Deskripsi:
+ *    Demonstrasi External Interrupt (EXTI) pada GPIO.
+ *    Push button pada GPIO4 men-trigger falling-edge interrupt.
+ *    ISR meng-set flag, main loop membaca flag dan toggle LED.
  *
- * ESP32 GPIO35 adalah INPUT ONLY (tidak ada internal pull-down).
- * Ini ideal untuk demo pull-down EKSTERNAL — kita harus menyediakan
- * resistor 220Ω dari GPIO35 ke GND secara fisik.
+ *  Koneksi Hardware:
+ *    - GPIO4  <- Push Button (ke GND, internal pull-up aktif)
+ *    - GPIO2  -> LED (+ resistor 220Ω ke GND)
  *
- * RANGKAIAN Pull-Down External:
- *   3.3V ─[BTN]─┬─ GPIO35 (INPUT, no internal pull)
- *                │
- *             [220Ω]
- *                │
- *               GND
- *
- *   Tombol TIDAK ditekan : GPIO35 = LOW  (0V via 220Ω ke GND)
- *   Tombol DITEKAN       : GPIO35 = HIGH (3.3V masuk, arus via 220Ω)
- *   → Active-HIGH behavior: press = HIGH
- *
- * LED: GPIO4 ─[220Ω]─ LED+ LED- ─ GND
- *
- * PLATFORM : ESP32 DevKit V1
- * FRAMEWORK: ESP-IDF (FreeRTOS)
- * ================================================================
+ *  Cara Kerja:
+ *    1. GPIO4 dikonfigurasi sebagai input dengan pull-up internal
+ *    2. Interrupt dikonfigurasi pada falling edge (tombol ditekan)
+ *    3. ISR handler meng-set volatile flag
+ *    4. Main loop mengecek flag, toggle LED, dan log counter
+ * ============================================================
  */
 
+#include <stdio.h>
+#include <stdbool.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
+#include "esp_log.h"
 
-/* ================================================================
- *  PIN DEFINITIONS
- * ================================================================ */
-/* GPIO35: INPUT ONLY, tidak ada internal pull-down!
- * → Wajib pakai pull-down eksternal 220Ω ke GND */
-#define BTN_PIN   GPIO_NUM_35
+#include "config.h"
 
-/* LED Output */
-#define LED_PIN   GPIO_NUM_4
+static const char *TAG = "EXTI_INT";
 
-/* ================================================================
- *  VARIABLES
- * ================================================================ */
-static int led_state = 0;
-static int last_btn  = 0;  /* Default LOW (pull-down menjaga LOW saat lepas) */
+/* ---- Volatile flag & counter (shared dengan ISR) ---- */
+static volatile bool     isr_flag  = false;
+static volatile uint32_t isr_count = 0;
 
-/* ================================================================
- *  GPIO INITIALIZATION
- * ================================================================ */
-static void gpio_init_all(void)
+/* ---- LED state ---- */
+static bool led_state = false;
+
+/**
+ * ISR Handler - dipanggil saat falling edge pada BUTTON_PIN.
+ * HARUS ber-atribut IRAM_ATTR agar kode tetap di IRAM.
+ */
+static void IRAM_ATTR gpio_isr_handler(void *arg)
 {
-    /* GPIO4: OUTPUT (LED) */
-    gpio_config_t out_conf = {
+    isr_flag = true;
+    isr_count++;
+}
+
+void app_main(void)
+{
+    ESP_LOGI(TAG, "=== ESP32 External Interrupt Demo ===");
+    ESP_LOGI(TAG, "Button pin : GPIO%d", BUTTON_PIN);
+    ESP_LOGI(TAG, "LED pin    : GPIO%d", LED_PIN);
+
+    /* ---- Konfigurasi LED (output) ---- */
+    gpio_config_t led_conf = {
         .pin_bit_mask = (1ULL << LED_PIN),
         .mode         = GPIO_MODE_OUTPUT,
         .pull_up_en   = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type    = GPIO_INTR_DISABLE,
     };
-    gpio_config(&out_conf);
+    gpio_config(&led_conf);
     gpio_set_level(LED_PIN, 0);
 
-    /* GPIO35: INPUT ONLY — tanpa pull internal
-     * Perlu pull-down eksternal 220Ω ke GND di rangkaian */
-    gpio_config_t in_conf = {
-        .pin_bit_mask = (1ULL << BTN_PIN),
+    /* ---- Konfigurasi Button (input + pull-up + falling edge) ---- */
+    gpio_config_t btn_conf = {
+        .pin_bit_mask = (1ULL << BUTTON_PIN),
         .mode         = GPIO_MODE_INPUT,
-        .pull_up_en   = GPIO_PULLUP_DISABLE,
+        .pull_up_en   = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type    = GPIO_INTR_DISABLE,
+        .intr_type    = GPIO_INTR_NEGEDGE,      // Falling edge
     };
-    gpio_config(&in_conf);
-}
+    gpio_config(&btn_conf);
 
-/* ================================================================
- *  MAIN APPLICATION
- * ================================================================ */
-void app_main(void)
-{
-    gpio_init_all();
+    /* ---- Install ISR service & attach handler ---- */
+    gpio_install_isr_service(0);
+    gpio_isr_handler_add(BUTTON_PIN, gpio_isr_handler, NULL);
 
-    while (1)
-    {
-        /* Baca GPIO35: Active-High pull-down
-         * 1 = BTN DITEKAN (HIGH, 3.3V masuk)
-         * 0 = BTN TIDAK DITEKAN (LOW via eksternal 220Ω ke GND) */
-        int btn = gpio_get_level(BTN_PIN);
+    ESP_LOGI(TAG, "Interrupt aktif. Tekan tombol untuk toggle LED...");
 
-        /* Toggle LED pada rising edge (LOW → HIGH = tekan baru) */
-        if ((btn == 1) && (last_btn == 0))
-        {
+    /* ---- Main Loop ---- */
+    while (1) {
+        if (isr_flag) {
+            isr_flag = false;
+
+            /* Toggle LED */
             led_state = !led_state;
-            gpio_set_level(LED_PIN, led_state);
-            vTaskDelay(pdMS_TO_TICKS(50));   /* debounce */
-        }
+            gpio_set_level(LED_PIN, led_state ? 1 : 0);
 
-        last_btn = btn;
+            ESP_LOGI(TAG, "Interrupt #%lu | LED = %s",
+                     (unsigned long)isr_count,
+                     led_state ? "ON" : "OFF");
+        }
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
